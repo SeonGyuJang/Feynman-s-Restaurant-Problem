@@ -1,0 +1,15 @@
+# Core
+numpy>=1.24
+pandas>=2.0
+scipy>=1.11
+datasets
+
+# Optional: only needed if using the respective provider
+# anthropic>=0.25     # or use built-in urllib (no install needed)
+# openai>=1.0         # or use built-in urllib (no install needed)
+# google-generativeai>=0.5  # or use built-in urllib (no install needed)
+
+# Analysis (notebooks)
+matplotlib>=3.7
+seaborn>=0.13
+jupyter>=1.0

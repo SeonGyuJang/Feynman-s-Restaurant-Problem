@@ -1,0 +1,21 @@
+# 환경변수
+.env
+
+# 데이터 (OSF에서 직접 다운로드)
+data/*.csv
+
+# 테스트 코드
+test/
+
+
+# 결과 (공개 전 제외)
+results/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
