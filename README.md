@@ -15,7 +15,7 @@ A fundamental challenge in decision-making is balancing **exploration** (trying 
 In the late 1970s, physicist Richard Feynman sat down for lunch at a Thai restaurant in Glendale, California with his friend Ralph Leighton. Leighton was debating whether to order his favorite dish or try something new. Feynman turned the dilemma into a math problem — and solved it. His handwritten notes survived but remained undeciphered for nearly 50 years.
 
 <p align="center">
-  <img src="assets/feynman_notes.jpg" alt="Richard Feynman's Handwritten Notes on the Restaurant Problem" width="80%" />
+  <img src="assets/feynman_note.jpg" alt="Richard Feynman's Handwritten Notes on the Restaurant Problem" width="80%" />
   <br>
   <em>Figure: Richard Feynman's original handwritten derivation of the restaurant problem.</em>
 </p>
