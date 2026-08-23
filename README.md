@@ -157,8 +157,8 @@ feynman-llm-study/
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-username/feynman-llm-study.git
-cd feynman-llm-study
+git clone [https://github.com/SeonGyuJang/Feynman-s-Restaurant-Problem.git]
+cd Feynman-s-Restaurant-Problem
 pip install -r requirements.txt
 ```
 
