@@ -35,6 +35,13 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+# .env 파일 자동 로드 (ANTHROPIC_API_KEY 등)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 미설치 시 환경변수 직접 설정 필요
+
 sys.path.insert(0, os.path.dirname(__file__))
 import linear
 from prompt_builder import (
@@ -206,7 +213,7 @@ def run_experiment(subject: dict,
 
     # 시스템 프롬프트: 페르소나 + 응답 형식 제약
     system_prompt = build_system_prompt(persona_condition, persona_text)
-    system_prompt += f"\n\n{RESPONSE_FORMAT}"
+    # 응답 형식은 사전학습 프롬프트에 포함되어 있으므로 system_prompt에 중복 추가 불필요
 
     # 로거 초기화
     logger = ExperimentLogger(verbose=verbose)
@@ -216,11 +223,8 @@ def run_experiment(subject: dict,
 
     # 사전 학습 (원 논문과 동일한 84개 샘플 + 응답 형식 안내 추가)
     pretrain = build_pretrain_prompt(subject["samples"], subject["total_nights"])
-    pretrain_with_format = pretrain + f"\n\n{RESPONSE_FORMAT}"
-    messages.append({"role": "user",      "content": pretrain_with_format})
-    messages.append({"role": "assistant", "content":
-                     "Understood. I have reviewed the restaurant score distribution. "
-                     "I will respond only with EXPLORE (row,col) or EXPLOIT."})
+    messages.append({"role": "user",      "content": pretrain})
+    messages.append({"role": "assistant", "content": "Understood."})
 
     prev_action = prev_score = prev_position = None
 
@@ -245,12 +249,22 @@ def run_experiment(subject: dict,
             except Exception as e:
                 err_str = str(e)
                 print(f"    [API 오류] {err_str} — 재시도 {attempt+1}/{max_retries}")
-                # 지수 백오프: 429(rate limit)는 더 길게 대기
-                if "429" in err_str:
-                    wait = 30 * (attempt + 1)   # 30s, 60s, 90s
+                # 403: 결제 문제 또는 권한 없음 → 재시도 무의미, 즉시 중단
+                if "403" in err_str:
+                    print("    !! 403 Forbidden — 결제 한도 초과 또는 권한 문제.")
+                    print("    !! 재시도해도 해결되지 않으므로 실험을 중단합니다.")
+                    print("    !! Google Cloud Console에서 결제 상태를 확인하세요:")
+                    print("    !! https://console.cloud.google.com/billing")
+                    raise RuntimeError(f"403 Forbidden — 실험 중단: {err_str}")
+                # 429: rate limit → 대기 후 재시도
+                elif "429" in err_str:
+                    wait = 30 * (attempt + 1)
                     print(f"    Rate limit — {wait}초 대기 중...")
-                elif "503" in err_str or "500" in err_str:
-                    wait = 10 * (attempt + 1)   # 10s, 20s, 30s
+                elif "503" in err_str:
+                    wait = 30 * (attempt + 1)
+                    print(f"    서버 과부하 — {wait}초 대기 중...")
+                elif "500" in err_str:
+                    wait = 10 * (attempt + 1)
                 else:
                     wait = 3 * (attempt + 1)    # 3s, 6s, 9s
                 time.sleep(wait)
@@ -323,6 +337,7 @@ def run_batch(samples_csv: str,
               output_csv: str = None,
               seed: int = 42,
               max_subjects: int = None,
+              resume: bool = False,
               verbose: bool = True) -> pd.DataFrame:
     """
     전체(또는 일부) 참가자에 대해 실험 수행 후 결과를 CSV 저장.
@@ -339,16 +354,16 @@ def run_batch(samples_csv: str,
     max_subjects      : 최대 실험 참가자 수
                         None → 전체 2,520명 (논문 실험 기본값)
                         정수 → 처음 N명만 (테스트 목적)
+    resume            : True이면 기존 output_csv에서 완료된 Subject를 확인하고
+                        이어서 실험 진행 (중단된 실험 재개)
     verbose           : 진행 상황 출력 여부
     """
     persona_condition = validate_condition(persona_condition)
-    client    = LLMClient(provider=provider, model=model)
+    client     = LLMClient(provider=provider, model=model)
     df_samples = load_samples(samples_csv)
 
-    # Subject ID 목록 결정
-    all_ids = sorted(df_samples["Subject"].tolist())
-    if max_subjects is not None:
-        all_ids = all_ids[:max_subjects]
+    # 전체 Subject ID 목록 (정렬)
+    all_ids_full = sorted(df_samples["Subject"].tolist())
 
     # 출력 경로 자동 생성
     if output_csv is None:
@@ -358,7 +373,37 @@ def run_batch(samples_csv: str,
 
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
 
-    # 페르소나 로더 초기화 (none이면 불필요)
+    # ── Resume: CSV에서 완료된 Subject 확인 ──────────────────────────────────
+    completed_ids = set()
+    existing_results = []
+
+    if resume and Path(output_csv).exists():
+        try:
+            existing_df = pd.read_csv(output_csv, index_col=0)
+            if len(existing_df) > 0 and "Subject" in existing_df.columns:
+                completed_ids = set(existing_df["Subject"].unique().tolist())
+                existing_results = [existing_df]
+                last_completed = max(completed_ids)
+                print(f"[Resume] 기존 결과 로드: {output_csv}")
+                print(f"  → 완료된 Subject: {len(completed_ids)}명 "
+                      f"(마지막 완료 ID: {last_completed})")
+        except Exception as e:
+            print(f"[Resume] 기존 파일 로드 실패 ({e}) — 처음부터 시작합니다.")
+
+    # ── 실행 대상 Subject 결정 ────────────────────────────────────────────────
+    # max_subjects: 전체 목록에서 앞에서 N개의 Subject ID를 대상으로 삼음
+    # resume: 그 중에서 completed_ids를 제외한 미완료분만 실행
+    #
+    # 예시:
+    #   전체: [0, 1, 2, ..., 2519]
+    #   CSV에 0~300 완료, max_subjects=1000
+    #   → 대상: [0, 1, ..., 999]
+    #   → 실행: [301, 302, ..., 999]  (완료된 0~300 제외)
+
+    target_ids = all_ids_full[:max_subjects] if max_subjects is not None else all_ids_full
+    remaining_ids = [sid for sid in target_ids if sid not in completed_ids]
+
+    # 페르소나 로더 초기화
     persona_loader = None
     if persona_condition != "none":
         persona_loader = PersonaLoader(personas_dir=personas_dir, seed=seed)
@@ -371,14 +416,23 @@ def run_batch(samples_csv: str,
     print(f"  Model       : {client.model_id}")
     print(f"  Persona     : {persona_condition}"
           + (f" (predicted bias: {bias_tag})" if persona_condition != "none" else " (baseline)"))
-    print(f"  Subjects    : {len(all_ids)}명"
+    print(f"  Target      : Subject {target_ids[0]}~{target_ids[-1]} "
+          f"({len(target_ids)}명)"
           + (" [전체]" if max_subjects is None else f" [max_subjects={max_subjects}]"))
+    if resume and completed_ids:
+        print(f"  완료        : {len(completed_ids)}명 → 실행 예정: {len(remaining_ids)}명 "
+              f"(Subject {remaining_ids[0] if remaining_ids else 'N/A'}~"
+              f"{remaining_ids[-1] if remaining_ids else 'N/A'})")
     print(f"  Output      : {output_csv}")
     print(f"{'='*65}\n")
 
-    all_results = []
+    if resume and len(remaining_ids) == 0:
+        print("[완료] 대상 Subject가 모두 완료되었습니다.")
+        return pd.read_csv(output_csv, index_col=0)
 
-    for idx, sid in enumerate(all_ids):
+    all_results = list(existing_results)  # 기존 결과 포함
+
+    for idx, sid in enumerate(remaining_ids):
         try:
             subject = get_subject(df_samples, sid)
 
@@ -407,11 +461,21 @@ def run_batch(samples_csv: str,
                     output_csv=output_csv,
                 )
 
-            # 10명마다 중간 저장
-            if (idx + 1) % 10 == 0 or (idx + 1) == len(all_ids):
-                pd.concat(all_results, ignore_index=True).to_csv(output_csv)
-                print(f"  → [{idx+1}/{len(all_ids)}] 저장: {output_csv}")
+            # 매 Subject마다 저장 (중단 대비)
+            pd.concat(all_results, ignore_index=True).to_csv(output_csv)
+            done_total  = len(completed_ids) + idx + 1  # 전체 완료 수
+            target_total = len(target_ids)
+            print(f"  → [{done_total}/{target_total}] Subject {sid} 저장 완료")
 
+        except RuntimeError as e:
+            # 403 등 재시도 불가 오류 → 지금까지 결과 저장 후 전체 중단
+            print(f"\n[실험 중단] {e}")
+            if all_results:
+                pd.concat(all_results, ignore_index=True).to_csv(output_csv)
+                print(f"  지금까지의 결과 저장 완료: {output_csv}")
+                print(f"  완료된 Subject: {len(completed_ids) + idx}명")
+                print(f"  재개 방법: python src/experiment.py ... --resume")
+            raise
         except Exception as e:
             print(f"  [오류] Subject {sid}: {e}")
             continue
@@ -419,7 +483,7 @@ def run_batch(samples_csv: str,
     if all_results:
         final_df = pd.concat(all_results, ignore_index=True)
         final_df.to_csv(output_csv)
-        print(f"\n[완료] {len(all_results)}명 결과 저장: {output_csv}")
+        print(f"\n[완료] 총 {len(final_df['Subject'].unique())}명 결과 저장: {output_csv}")
         return final_df
 
     print("[경고] 수집된 결과 없음")
@@ -434,19 +498,17 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 예시:
-  # 전체 2,520명 실험 — no-persona baseline (Anthropic)
-  python src/experiment.py --provider anthropic
+  # 전체 2,520명 실험 — no-persona baseline
+  python src/experiment.py --provider google --model gemini-3.6-flash
 
   # 처음 10명만 테스트
-  python src/experiment.py --provider anthropic --max_subjects 10
+  python src/experiment.py --provider google --model gemini-3.6-flash --max_subjects 10
+
+  # 중단된 실험 이어서 재개 (--resume)
+  python src/experiment.py --provider google --model gemini-3.6-flash --resume
 
   # 도메인 페르소나 (먼저: python src/download_personas.py)
-  python src/experiment.py --provider anthropic --persona law
-  python src/experiment.py --provider openai   --persona philosophy
-
-  # 다른 모델 지정
-  python src/experiment.py --provider openai  --model gpt-4o
-  python src/experiment.py --provider google  --model gemini-1.5-pro
+  python src/experiment.py --provider google --model gemini-3.6-flash --persona law
 
 지원 모델:
 """ + "\n".join(
@@ -476,6 +538,9 @@ if __name__ == "__main__":
                         help="랜덤 시드")
     parser.add_argument("--max_subjects",  type=int, default=None,
                         help="최대 실험 참가자 수 (테스트용; 생략 시 전체 2,520명)")
+    parser.add_argument("--resume",        action="store_true",
+                        help="중단된 실험 이어서 재개. "
+                             "output CSV에서 완료된 Subject를 확인하고 나머지만 실행.")
     parser.add_argument("--quiet",         action="store_true",
                         help="진행 상황 출력 억제")
     args = parser.parse_args()
@@ -489,5 +554,6 @@ if __name__ == "__main__":
         output_csv        = args.output,
         seed              = args.seed,
         max_subjects      = args.max_subjects,
+        resume            = args.resume,
         verbose           = not args.quiet,
     )

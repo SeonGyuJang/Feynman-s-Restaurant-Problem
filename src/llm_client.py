@@ -64,13 +64,12 @@ PROVIDER_CONFIGS = {
     "google": {
         "url":             "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         "env_key":         "GOOGLE_API_KEY",
-        "default_model":   "gemini-flash-latest",
-        "request_interval": 5.0,   # 무료 tier: 분당 15회 → 4초 이상 간격
+        "default_model":   "gemini-3.6-flash",
+        "request_interval": 2.0,   # 유료 tier
         "models": [
-            "gemini-flash-latest",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "gemini-3.6-flash",      # 권장 — 최신 GA, 유료 (2026-07)
+            "gemini-3.5-flash-lite", # 경량, 저비용
+            "gemini-flash-latest",   # 항상 최신 flash alias
         ],
     },
     "groq": {
@@ -249,8 +248,18 @@ class LLMClient:
             contents.append({"role": role, "parts": [{"text": m["content"]}]})
 
         payload = {
-            "contents":         contents,
-            "generationConfig": {"maxOutputTokens": self.max_tokens},
+            "contents": contents,
+            "generationConfig": {
+                # thinkingLevel: "minimal" — Thinking 유지하되 최소화
+                # 이유:
+                #   - Gemini 3.6 기본값(medium)은 output 대부분을 thinking이 소모
+                #     → maxOutputTokens 초과로 실제 응답("EXPLORE (r,c)")이 잘림
+                #   - Thinking을 완전히 끄면(none) 인간의 숙고 과정을 모사하지 못함
+                #   - minimal은 최소한의 추론만 수행 → 출력 안정 + 연구 타당성 유지
+                # 주의: thinkingBudget(구버전)과 thinkingLevel을 함께 쓰면 오류
+                "thinkingConfig": {"thinkingLevel": "minimal"},
+                "maxOutputTokens": max(self.max_tokens, 256),
+            },
         }
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}

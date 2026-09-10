@@ -83,30 +83,39 @@ def build_pretrain_prompt(samples: list, total_nights: int) -> str:
     84개 샘플을 4×7 그리드 3화면으로 제시하는 사전 학습 프롬프트.
     원 논문과 동일하게 3개 화면으로 나누어 제시.
     """
-    assert len(samples) == 3 and all(len(s) == 28 for s in samples)
+    # 샘플 화면 수가 3개가 아닌 경우에도 있는 만큼만 제시
+    # 정상: 3화면 × 28개 = 84개
+    # 비정상 케이스 (원본 데이터 결함):
+    #   Subject 103:  2화면 (56개), Subject 1169: 0화면, Subject 1929: 5화면
+    # → 논문에서 이 3개 Subject는 별도 명시 필요
+    if len(samples) == 0:
+        pretrain_text = "(No sample data available for this subject.)"
+    else:
+        screens = []
+        for i, screen_data in enumerate(samples):
+            grid_values = [screen_data[r * 7: r * 7 + 7] for r in range(4)]
+            screens.append(
+                f"[Sample screen {i+1}/{len(samples)}]\n"
+                f"{render_grid_with_values(grid_values)}"
+            )
+        pretrain_text = "\n\n".join(screens)
 
-    screens = []
-    for i, screen_data in enumerate(samples):
-        grid_values = [screen_data[r * 7: r * 7 + 7] for r in range(4)]
-        screens.append(f"[샘플 화면 {i+1}/3]\n{render_grid_with_values(grid_values)}")
+    n_samples = sum(len(s) for s in samples)
+    n_screens = len(samples)
+    sample_desc = f"{n_samples} sample restaurants ({n_screens} screen{'s' if n_screens != 1 else ''})"
 
-    return f"""당신은 새로운 도시에서 {total_nights}일간 살게 됩니다.
-매일 밤 레스토랑을 하나 선택해야 하며, {total_nights}일간의 총 점수 합계를 최대화하는 것이 목표입니다.
+    return f"""You will stay in a city for {total_nights} nights. Each night, visit one restaurant to maximise your total score over all {total_nights} nights.
 
-[규칙]
-- 레스토랑은 4행(R0~R3) × 7열(C0~C6) 그리드로 구성됩니다.
-- 레스토랑 점수는 방문 전까지 알 수 없습니다 (?로 표시).
-- 한번 방문한 레스토랑의 점수는 기억되며 그리드에 표시됩니다.
-- 매일 밤 두 가지 중 하나를 선택합니다:
-  * 탐색(Explore): 아직 방문하지 않은 레스토랑의 좌표 입력 → 점수 공개
-  * 착취(Exploit): 지금까지 방문한 레스토랑 중 최고 점수 레스토랑으로 복귀
+Grid layout: 4 rows (R0–R3) × 7 columns (C0–C6). Scores are hidden until visited.
+Each turn respond with exactly ONE of:
+  EXPLORE (row,col)  — visit an unvisited restaurant, e.g. EXPLORE (2,3)
+  EXPLOIT            — return to your best restaurant so far
 
-먼저 이 도시 레스토랑들의 점수 분포를 파악하기 위해
-샘플 점수 84개를 3개 화면에 걸쳐 보여드립니다.
+First, study the score distribution from {sample_desc}:
 
-{chr(10).join(screens)}
+{pretrain_text}
 
-위 점수 분포의 특성을 충분히 파악하셨다면, 본 실험을 시작합니다."""
+Distribution noted. Experiment begins now."""
 
 
 # ── LLM 응답 파싱 ─────────────────────────────────────────────────────────────
@@ -244,9 +253,9 @@ class ExperimentState:
         # 직전 결과 메시지
         if prev_action == "explore" and prev_score is not None:
             r, c = prev_position
-            result_line = f"[직전 결과] 탐색 ({r},{c}) → {prev_score}점 발견"
+            result_line = f"Result: EXPLORE ({r},{c}) → {prev_score}pts"
         elif prev_action == "exploit":
-            result_line = f"[직전 결과] 착취 → {self.best_score}점 레스토랑 재방문"
+            result_line = f"Result: EXPLOIT → {self.best_score}pts"
         else:
             result_line = ""
 
@@ -254,36 +263,25 @@ class ExperimentState:
             visited=self.visited,
             highlight=self.last_explored if prev_action == "explore" else None,
         )
-        header = f"=== {night_num}일차 / 총 {self.total_nights}일 | 남은 날: {nr}일 ==="
-
         unvisited_cnt = 28 - len(self.visited)
 
         # 첫날: 무조건 탐색
         if self.current_night == 0:
-            body = (
-                f"현재 그리드 (R: 행, C: 열):\n{grid_str}\n\n"
-                "아직 방문한 레스토랑이 없습니다. 오늘은 반드시 탐색해야 합니다.\n\n"
-                "방문할 레스토랑의 좌표를 (행, 열) 형식으로 답하세요.\n"
-                "예시: (0,3) 또는 (2,5)"
+            return (
+                f"Night 1/{self.total_nights} | Remaining: {nr}\n\n"
+                f"{grid_str}\n\n"
+                "No visits yet. EXPLORE (row,col):"
             )
         else:
-            best_info = (
-                f"현재 최고 점수: {self.best_score}점 "
-                f"@ ({self.best_position[0]},{self.best_position[1]})"
-            )
-            last_line = " (마지막 날)" if nr == 1 else ""
-            body = (
+            last_tag = " [LAST NIGHT]" if nr == 1 else ""
+            return (
                 f"{result_line}\n\n"
-                f"현재 그리드 (★: 이번 방문, 숫자: 방문 점수, ?: 미방문):\n{grid_str}\n\n"
-                f"{best_info}\n"
-                f"남은 날: {nr}일{last_line} | 미방문 레스토랑 수: {unvisited_cnt}개\n\n"
-                "선택하세요:\n"
-                f"- 탐색(Explore): 미방문 레스토랑 좌표 입력 → 예: (1,4)\n"
-                f"- 착취(Exploit): 최고 점수({self.best_score}점) 레스토랑 복귀 → \"착취\" 입력\n\n"
-                "반드시 좌표 (행,열) 또는 \"착취\" 중 하나만 답하세요."
+                f"Night {night_num}/{self.total_nights} | "
+                f"Best: {self.best_score}pts @ ({self.best_position[0]},{self.best_position[1]}) | "
+                f"Remaining: {nr}{last_tag}\n\n"
+                f"{grid_str}\n\n"
+                "EXPLORE (row,col) or EXPLOIT:"
             )
-
-        return f"{header}\n\n{body}"
 
     # ── 결과 저장 ─────────────────────────────────────────────────────────────
 
@@ -322,5 +320,5 @@ class ExperimentState:
 # ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
 
 def build_system_prompt(persona: str = None) -> str:
-    base = "당신은 레스토랑 선택 실험에 참여하는 참가자입니다. 주어진 규칙에 따라 행동하세요."
+    base = "You are a participant in a restaurant selection experiment."
     return f"{persona}\n\n{base}" if persona else base
