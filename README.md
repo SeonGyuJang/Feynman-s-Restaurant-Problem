@@ -142,7 +142,10 @@ feynman-llm-study/
 │   ├── llm_client.py                 ← Multi-provider LLM client (Anthropic / OpenAI / Google)
 │   ├── personas.py                   ← Persona conditions, loader, system prompt builder
 │   ├── download_personas.py          ← Download PersonaHub personas to data/personas/
-│   └── linear.py                     ← PMF utilities (adapted from Christian et al., 2026)
+│   ├── linear.py                     ← PMF utilities (adapted from Christian et al., 2026)
+│   ├── analyze.py                    ← Total-score comparison figure (Optimal vs. Human vs. LLM)
+│   ├── threshold_analysis.py         ← Eq.5 threshold-curve figure (Optimal vs. LLM, by persona)
+│   └── grid_heatmap.py               ← 4×7 grid exploration heatmaps, faceted by persona/distribution
 │
 ├── data/
 │   ├── README.md                     ← Data download instructions
@@ -293,6 +296,37 @@ Results are saved as CSV files. Column structure matches Christian et al. (2026)
 5. **Persona effects (H4)**: Test whether domain persona conditions shift threshold intercepts in the predicted directions (exploit-biased domains → lower intercepts; explore-biased domains → higher intercepts).
 
 6. **Spatial pattern analysis** *(novel)*: Analyse grid coordinate choices to detect systematic scanning strategies and spatial biases not measurable in the original human study.
+
+### Generating Figures
+
+```bash
+# ① Total-score comparison (Optimal vs. Human vs. LLM) — original paper's summary figure
+python src/analyze.py --llm_csv results/*.csv --output figures/comparison.pdf
+
+# ② Threshold curves (Optimal vs. LLM), Eq.5 logistic fit — reproduces the paper's
+#    core figure: linear threshold t(x) = a + m*x vs. Feynman's nonlinear optimum.
+#    Compare across personas (default) or models.
+python src/threshold_analysis.py --results_csv "results/*.csv" --group_by Persona \
+    --output figures/threshold_curves.pdf
+
+# ③ Grid exploration heatmaps — where on the 4×7 grid the LLM chose to EXPLORE,
+#    faceted by persona (novel spatial-pattern contribution; not measurable in
+#    the original human study) or by distribution.
+python src/grid_heatmap.py --results_csv "results/*.csv" --facet Persona \
+    --output figures/grid_heatmaps_by_persona.pdf
+```
+
+`threshold_analysis.py` fits the paper's Eq. 5 logistic model
+(`P(Explore) = sigmoid(beta * (a + m*x - best_known))`) separately per
+`(group, distribution)`, pooling across `Total Nights` — matching the finding
+that slope is shared across night-count conditions. A shared slope `m` across
+personas but a shifted intercept `a` indicates a framing effect (persona
+changes the LLM's overall risk level); a **changed slope** indicates the
+persona altered the underlying explore-to-exploit strategy itself.
+
+`grid_heatmap.py` uses only `Action == "Explore"` rows (an `Exploit` always
+returns to the existing best position, so it carries no new spatial choice)
+and normalises selection counts to a 4×7 proportion matrix per group.
 
 ---
 
