@@ -251,7 +251,7 @@ def plot_threshold_curves(df: pd.DataFrame,
             xs, ts = _optimal_curve(dist, t_nights)
             ax.plot(xs, ts, linestyle=":", linewidth=1.2,
                     color="black", alpha=0.35 + 0.2 * ti,
-                    label=f"Feynman Optimal (T={t_nights})" if True else None)
+                    label=f"Feynman Optimal (T={t_nights})")
 
         # ② 그룹별 선형 임계값 적합 (실선)
         dist_fits = fits[fits["distribution"] == dist] if len(fits) else fits
